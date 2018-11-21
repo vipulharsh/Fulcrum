@@ -40,7 +40,7 @@ class Job(object):
         elif task_distribution == TaskDistributions.CONSTANT:
             self.constant_distributed_tasks(median_task_duration)
         self.longest_task = max(self.unscheduled_tasks)
-
+        self.job_id_hash = random.randint(1, int(1.0e18))
         self.scheduler = scheduler
         self.probed_workers = set()
 

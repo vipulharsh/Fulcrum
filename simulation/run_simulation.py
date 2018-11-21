@@ -19,6 +19,8 @@ import simulation_batch
 import simulation_centralized
 import simulation_multi
 import simulation_cancellation
+import simulation_fulcrum
+import simulation_fulcrum2
 import util
 
 def get_percentile(N, percent, key=lambda x:x):
@@ -33,46 +35,55 @@ def get_percentile(N, percent, key=lambda x:x):
     d1 = key(N[int(c)]) * (k-f)
     return d0 + d1
 
-NUM_JOBS = 10000
+NUM_JOBS = 5000
 DISTRIBUTION = util.TaskDistributions.EXP_JOBS
 
 loads = [0.1, 0.3, 0.5, 0.7, 0.8, 0.9, 0.95]
+#loads = [0.1, 0.3, 0.5]
 #loads = [0.95]
 loads.reverse()
 for load in loads:
     print "Running simulations at %s load" % load
 
+    print "\nFulcrum2"
+    s = simulation_fulcrum2.Simulation(NUM_JOBS, "fulcrum2_%s" % load, load, DISTRIBUTION)
+    s.run()
+
+    print "\nFulcrum"
+    s = simulation_fulcrum.Simulation(NUM_JOBS, "fulcrum_%s" % load, load, DISTRIBUTION)
+    s.run()
+
     print "******Multiget"
     s = simulation_multi.Simulation(NUM_JOBS, "multi_tasks_%s" % load, load, DISTRIBUTION)
     s.run()
+    continue
 
-
-    print "Sparrow"
+    print "\nSparrow"
     simulation_cancellation.WORK_STEALING = False
     simulation_cancellation.CANCELLATION = False
     s = simulation_cancellation.Simulation(NUM_JOBS, "sparrow_%s" % load, load, DISTRIBUTION)
     s.run()
 
-    print "Cancellation"
+    print "\nCancellation"
     simulation_cancellation.WORK_STEALING = False
     simulation_cancellation.CANCELLATION = True
     s = simulation_cancellation.Simulation(NUM_JOBS, "cancellation_%s" % load, load, DISTRIBUTION)
     s.run()
 
-    print "Centralized"
+    print "\nCentralized"
     s = simulation_centralized.Simulation(NUM_JOBS, "centralized_%s" % load, load, DISTRIBUTION)
     s.run()
 
-    print "Random"
+    print "\nRandom"
     s = simulation_random.Simulation(NUM_JOBS, "random_%s" % load, load, DISTRIBUTION)
     s.run()
 
-    print "Per task"
+    print "\nPer task"
     simulation_batch.PER_TASK = True
     s = simulation_batch.Simulation(NUM_JOBS, "per_task_%s" % load, load, DISTRIBUTION)
     s.run()
 
-    print "Batch sampling"
+    print "\nBatch sampling"
     simulation_batch.PER_TASK = False
     s = simulation_batch.Simulation(NUM_JOBS, "batch_%s" % load, load, DISTRIBUTION)
     s.run()
