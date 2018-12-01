@@ -28,6 +28,7 @@ NETWORK_DELAY = 0.5
 TASKS_PER_JOB = 100
 SLOTS_PER_WORKER = 4
 TOTAL_WORKERS = 10000
+WARM_UP_TIME = 500
 
 def get_percentile(N, percent, key=lambda x:x):
     if not N:
@@ -68,11 +69,13 @@ class JobArrival(Event):
         self.task_distribution = task_distribution
 
     def run(self, current_time):
+        random.seed(current_time)
         job = Job(TASKS_PER_JOB, current_time, self.task_distribution, MEDIAN_TASK_DURATION)
         #print "Job %s arrived at %s" % (job.id, current_time)
         # Schedule job.
         new_events = self.simulation.schedule_tasks(job, current_time)
         # Add new Job Arrival event, for the next job to arrive after this one.
+        random.seed(current_time)
         arrival_delay = random.expovariate(1.0 / self.interarrival_delay)
         new_events.append((current_time + arrival_delay, self))
         #print "Retuning %s events" % len(new_events)
@@ -149,7 +152,7 @@ class Simulation(object):
         complete_jobs = [j for j in self.jobs.values() if j.completed_tasks_count == j.num_tasks]
         print "%s complete jobs" % len(complete_jobs)
         response_times = [job.end_time - job.start_time for job in complete_jobs
-                          if job.start_time > 500]
+                          if job.start_time > WARM_UP_TIME]
         print "Included %s jobs" % len(response_times)
         plot_cdf(response_times, "%s_response_times.data" % self.file_prefix)
         print "Average response time: ", numpy.mean(response_times)

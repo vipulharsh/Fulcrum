@@ -68,15 +68,28 @@ class JobArrival(Event):
         self.task_distribution = task_distribution
 
     def run(self, current_time):
+        random.seed(current_time)
         job = Job(TASKS_PER_JOB, current_time, self.task_distribution, MEDIAN_TASK_DURATION)
         #print "Job %s arrived at %s" % (job.id, current_time)
         # Schedule job.
         new_events = self.simulation.send_tasks(job, current_time)
         # Add new Job Arrival event, for the next job to arrive after this one.
+        random.seed(current_time)
         arrival_delay = random.expovariate(1.0 / self.interarrival_delay)
         new_events.append((current_time + arrival_delay, self))
         #print "Retuning %s events" % len(new_events)
         return new_events
+
+
+class TokenArrival(Event):
+    """ Event to signify a token arriving at a scheduler. """
+    def __init__(self, simulation, worker_id):
+        self.simulation = simulation
+        self.worker_id = worker_id
+
+    def run(self, current_time):
+        return self.simulation.add_token(self.worker_id, current_time)
+
 
 class TaskArrival(Event):
     """ Event to signify a task arriving at a worker. """
@@ -103,44 +116,6 @@ class Worker(object):
         self.queued_tasks = Queue.Queue()
         self.id = id
         self.worker_time_pairs = dict()
-        self.last_token_sent_time = -1000000
-
-    def recv_gossip_info(self, source_worker, gossip_info):
-        for (w, t) in gossip_info:
-            self.worker_time_pairs[w] = t
-
-    def get_random_worker(self, current_time):
-        workers = self.worker_time_pairs.keys()
-        threshold = 100
-        for w in workers:
-            t = self.worker_time_pairs[w]
-            #Filter older tokens
-            if(current_time - t > threshold):
-                del self.worker_time_pairs[w]
-        if(len(self.worker_time_pairs) > 0):
-            w = random.choice(self.worker_time_pairs.keys())
-            del self.worker_time_pairs[w]
-            return w
-        else:
-            return random.choice(self.simulation.worker_indices)
-
-    def get_gossip_info(self, current_time):
-        ret = []
-        threshold = 100
-        workers = self.worker_time_pairs.keys()
-        for w in workers:
-            t = self.worker_time_pairs[w]
-            if(current_time - t <= threshold):
-                if(random.randint(1, 10) == 7):
-                    ret.append((w, t))
-                    del self.worker_time_pairs[w]
-            else:
-                del self.worker_time_pairs[w]
-        if(self.queued_tasks.qsize() == 0 and current_time - self.last_token_sent_time > 10): 
-            #!TODO: Check if self.id is same as worker_index
-            ret.append((self.id, current_time))
-            self.last_token_sent_time = current_time
-        return ret
 
     def add_task(self, current_time, task_duration, job_id):
         #print "Task for job %s arrived at worker %s" % (job_id, self.id)
@@ -150,8 +125,12 @@ class Worker(object):
     def free_slot(self, current_time):
         """ Frees a slot on the worker and attempts to launch another task in that slot. """
         self.free_slots += 1
-        get_task_events = self.maybe_start_task(current_time)
-        return get_task_events
+        new_events = self.maybe_start_task(current_time)
+        assert (self.free_slots > 0)
+        if self.free_slots > 0:
+            token = TokenArrival(self.simulation, self.id)
+            new_events.append((current_time+NETWORK_DELAY, token))
+        return new_events
 
     def maybe_start_task(self, current_time):
         if not self.queued_tasks.empty() and self.free_slots > 0:
@@ -180,53 +159,48 @@ class Simulation(object):
         self.remaining_jobs = num_jobs
         self.event_queue = Queue.PriorityQueue()
         self.workers = []
+        self.unscheduled_jobs = Queue.PriorityQueue()
         self.file_prefix = file_prefix
         while len(self.workers) < TOTAL_WORKERS:
             self.workers.append(Worker(self, SLOTS_PER_WORKER, len(self.workers)))
         self.worker_indices = range(TOTAL_WORKERS)
+        self.tokens = list()
+        #Populate initial tokens
+        for i in range(TOTAL_WORKERS):
+            for n in range(SLOTS_PER_WORKER):
+                self.tokens.append(i)
         self.task_distribution = task_distribution
 
-
-    def accept_task(self, task_header, worker_idx, k):
-        if(k >= 9):
-            return True
-        queue_len = self.workers[worker_idx].queued_tasks.qsize() + SLOTS_PER_WORKER - self.workers[worker_idx].free_slots
-        if((queue_len <= task_header.curr_queue_len and k>=4) or queue_len == 0):
-            return True
-        else:
-            return False
-        #if(queue_len > 0):
-        #    print "Assigning task %s to worker %s at hop %s queue len %s" % (i, chosen_worker_idx, k, queue_len)
+    def add_token(self, worker_id, current_time):
+        self.tokens.append(worker_id)
+        return self.maybe_schedule_task(current_time)
         
-
     def send_tasks(self, job, current_time):
-        """ Task randomly hops on to other machines. """
+        """ Schedule tasks if tokens available. """
         self.jobs[job.id] = job
-        task_arrival_events = []
-        for i in range(len(job.unscheduled_tasks)):
-            delay = 0.0
-            curr_header = self.TaskHeader(10000000) #task_header
-            chosen_worker_idx = -1
-            prev_worker = (job.job_id_hash)%len(self.workers)
-            for k in range(10):
-                delay += NETWORK_DELAY
-                worker_idx = self.workers[prev_worker].get_random_worker(current_time)
-                gossip_info = self.workers[prev_worker].get_gossip_info(current_time)
-                self.workers[worker_idx].recv_gossip_info(prev_worker, gossip_info)
-                if(self.accept_task(curr_header, worker_idx, k)):
-                    chosen_worker_idx = worker_idx
-                    break
-                #Update Task Header
-                queue_len = self.workers[worker_idx].queued_tasks.qsize() + SLOTS_PER_WORKER - self.workers[worker_idx].free_slots
-                curr_header.curr_queue_len = min(queue_len, curr_header.curr_queue_len)
-                #Update prev_worker
-                prev_worker = worker_idx
-
-            task_arrival_events.append(
-                    (current_time + delay,
-                     TaskArrival(self.workers[chosen_worker_idx], job.unscheduled_tasks[i], job.id)))
+        self.unscheduled_jobs.put((current_time, job))
+        #print "comes here", len(job.unscheduled_tasks), len(self.tokens)
+        task_arrival_events = self.maybe_schedule_task(current_time)
+        #print "finished"
         return task_arrival_events
                     
+    def maybe_schedule_task(self, current_time):
+        task_arrival_events = []
+        if(self.unscheduled_jobs.qsize() > 0):
+            #Only need to check more than 1 job, as function gets invoked on arrival of each token
+            time_job, job = self.unscheduled_jobs.get()
+            ntasks = min(len(self.tokens), len(job.unscheduled_tasks))
+            for i in range(ntasks):
+                chosen_worker_idx = self.tokens.pop()
+                task_duration = job.unscheduled_tasks.pop()
+                task_arrival_events.append(
+                        (current_time + NETWORK_DELAY,
+                         TaskArrival(self.workers[chosen_worker_idx], task_duration, job.id)))
+            #If tasks left, put it back in the queue
+            if(len(job.unscheduled_tasks) > 0):
+                self.unscheduled_jobs.put((time_job, job))
+        return task_arrival_events
+
 
     def add_task_completion_time(self, job_id, completion_time):
         job_complete = self.jobs[job_id].task_completed(completion_time)

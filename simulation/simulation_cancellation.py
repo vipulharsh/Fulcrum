@@ -26,6 +26,7 @@ NETWORK_DELAY = 0.5
 TASKS_PER_JOB = 100
 SLOTS_PER_WORKER = 4
 TOTAL_WORKERS = 10000
+WARM_UP_TIME = 500
 PROBE_RATIO = 2
 CANCELLATION = False
 WORK_STEALING = False
@@ -71,12 +72,14 @@ class JobArrival(Event):
 
     def run(self, current_time):
         scheduler = random.randint(0, NUM_SCHEDULERS - 1)
+        random.seed(current_time)
         job = Job(TASKS_PER_JOB, current_time, self.task_distribution, MEDIAN_TASK_DURATION,
                   scheduler)
         #print "Job %s arrived at %s" % (job.id, current_time)
         # Schedule job.
         new_events = self.simulation.send_probes(job, current_time)
         # Add new Job Arrival event, for the next job to arrive after this one.
+        random.seed(current_time)
         arrival_delay = random.expovariate(1.0 / self.interarrival_delay)
         new_events.append((current_time + arrival_delay, self))
         #print "Retuning %s events" % len(new_events)
@@ -342,13 +345,13 @@ class Simulation(object):
         complete_jobs = [j for j in self.jobs.values() if j.completed_tasks_count == j.num_tasks]
         print "%s complete jobs" % len(complete_jobs)
         response_times = [job.end_time - job.start_time for job in complete_jobs
-                          if job.start_time > 500]
+                          if job.start_time > WARM_UP_TIME]
         print "Included %s jobs" % len(response_times)
         plot_cdf(response_times, "%s_response_times.data" % self.file_prefix)
         print "Average response time: ", numpy.mean(response_times)
 
         wait_times = [j.time_all_tasks_scheduled - j.start_time for j in complete_jobs
-                      if j.start_time > 500]
+                      if j.start_time > WARM_UP_TIME]
         plot_cdf(wait_times, "%s_wait_times.data" % self.file_prefix)
         print "Average wait time: ", numpy.mean(wait_times)
 
