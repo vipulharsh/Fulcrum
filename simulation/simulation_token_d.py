@@ -20,15 +20,14 @@ import math
 import numpy
 import random
 import Queue
-from util import Job, TaskDistributions
+import util
+from util import Job, TaskDistributions, JobsFromDistribution, JobsFromTrace
+from util import NUM_SCHEDULERS, TASKS_PER_JOB, MEDIAN_TASK_DURATION
 
-MEDIAN_TASK_DURATION = 100
 NETWORK_DELAY = 0.5
-TASKS_PER_JOB = 100
 SLOTS_PER_WORKER = 4
-TOTAL_WORKERS = 10000
+TOTAL_WORKERS = 1000
 WARM_UP_TIME = 500
-NUM_SCHEDULERS = 10
 
 def get_percentile(N, percent, key=lambda x:x):
     if not N:
@@ -64,23 +63,56 @@ class Event(object):
 class JobArrival(Event):
     """ Event to signify a job arriving at a scheduler. """
     def __init__(self, simulation, interarrival_delay, task_distribution):
+        self.job_generator = JobsFromDistribution(interarrival_delay, task_distribution)
         self.simulation = simulation
-        self.interarrival_delay = interarrival_delay
-        self.task_distribution = task_distribution
 
     def run(self, current_time):
-        random.seed(current_time)
-        job = Job(TASKS_PER_JOB, current_time, self.task_distribution, MEDIAN_TASK_DURATION)
+        job = self.job_generator.get_next_job(current_time)
         #print "Job %s arrived at %s" % (job.id, current_time)
         # Schedule job.
         new_events = self.simulation.send_tasks(job, current_time)
+
         # Add new Job Arrival event, for the next job to arrive after this one.
-        random.seed(current_time)
-        arrival_delay = random.expovariate(1.0 / self.interarrival_delay)
-        new_events.append((current_time + arrival_delay, self))
+        arrival_delay = self.job_generator.get_next_job_delay(current_time)
+        if(arrival_delay != None):
+            new_events.append((current_time + arrival_delay, self))
+        else:
+            self.simulation.no_more_jobs = True
         #print "Retuning %s events" % len(new_events)
         return new_events
 
+
+class JobArrivalFile(Event):
+    """ Event to signify a job arriving at a scheduler. """
+    def __init__(self, simulation, tracefile):
+        self.job_generator = JobsFromTrace(tracefile)
+        self.simulation = simulation
+        print "NUM_SCHEDULERS: ", NUM_SCHEDULERS
+
+    def run(self, current_time):
+        job = self.job_generator.get_next_job(current_time)
+        if(job.id % 5000 == 0):
+            print "Job %s arrived at %s" % (job.id, current_time)
+        # Schedule job.
+        new_events = self.simulation.send_tasks(job, current_time)
+        # Add new Job Arrival event, for the next job to arrive after this one.
+        arrival_delay = self.job_generator.get_next_job_delay(current_time)
+        if(arrival_delay != None):
+            new_events.append((current_time + arrival_delay, self))
+        else:
+            self.simulation.no_more_jobs = True
+        #print "Retuning %s events" % len(new_events)
+        return new_events
+
+class HeartbeatEvent(Event):
+    def __init__(self, simulation):
+        self.simulation = simulation
+        self.heartbeat_period = 1
+
+    def run(self, current_time):
+        new_events = self.simulation.redistribute_tokens(current_time)
+        new_events.append((current_time + self.heartbeat_period, self))
+        return new_events
 
 class TokenArrival(Event):
     """ Event to signify a token arriving at a scheduler. """
@@ -152,15 +184,18 @@ class Simulation(object):
             self.curr_queue_len = curr_queue_len
 
     def __init__(self, num_jobs, file_prefix, load, task_distribution):
+        #util.NUM_SCHEDULERS = 2
         avg_used_slots = load * SLOTS_PER_WORKER * TOTAL_WORKERS
         self.interarrival_delay = (1.0 * MEDIAN_TASK_DURATION * TASKS_PER_JOB / avg_used_slots)
         print ("Interarrival delay: %s (avg slots in use: %s)" %
                (self.interarrival_delay, avg_used_slots))
         self.jobs = {}
         self.remaining_jobs = num_jobs
+        self.finished_jobs = 0
         self.event_queue = Queue.PriorityQueue()
         self.workers = []
         self.unscheduled_jobs = []
+        self.no_more_jobs = False
         for i in range(NUM_SCHEDULERS):
             self.unscheduled_jobs.append(Queue.PriorityQueue())
         self.file_prefix = file_prefix
@@ -181,24 +216,50 @@ class Simulation(object):
         scheduler = random.randint(0, NUM_SCHEDULERS-1)
         self.tokens[scheduler].append(worker_id)
         return self.maybe_schedule_task(current_time, scheduler)
-        
+       
+    def steal_tokens(self, scheduler, tokens_needed):
+        for i in range(NUM_SCHEDULERS):
+            if(i != scheduler):
+                i_tokens = len(self.tokens[i])
+                while(i_tokens > 0 and tokens_needed > 0):
+                    self.tokens[scheduler].append(self.tokens[i].pop())
+                    i_tokens -= 1
+                    tokens_needed -= 1
+
+    def redistribute_tokens(self, current_time):
+        tokens_needed = [0 for x in range(NUM_SCHEDULERS)]
+        for scheduler in range(NUM_SCHEDULERS):
+            for time, job in self.unscheduled_jobs[scheduler].queue:
+                tokens_needed[scheduler] += len(job.unscheduled_tasks)
+        schedulers = range(NUM_SCHEDULERS)
+        random.shuffle(schedulers)
+        new_events = []
+        for i in range(NUM_SCHEDULERS):
+            s_i = schedulers[i]
+            for j in range(i+1, NUM_SCHEDULERS):
+                s_j = schedulers[j]
+                if(tokens_needed[s_i] > 0 and len(self.tokens[s_i]) > 0):
+                    print "what the ", s_i, tokens_needed[s_i], len(self.tokens[s_i])
+                assert(tokens_needed[s_i] == 0 or len(self.tokens[s_i]) == 0)
+                while(tokens_needed[s_i] > 0 and len(self.tokens[s_j]) > 0):
+                    self.tokens[s_i].append(self.tokens[s_j].pop())
+                    new_events.extend(self.maybe_schedule_task(current_time + 2 * NETWORK_DELAY, s_i))
+                    tokens_needed[s_i] -= 1
+        return new_events 
+
     def send_tasks(self, job, current_time):
         """ Schedule tasks if tokens available. """
         self.jobs[job.id] = job
-        scheduler = job.job_id_hash % NUM_SCHEDULERS
+        scheduler = job.scheduler
         self.unscheduled_jobs[scheduler].put((current_time, job))
+        '''
         if(len(self.tokens[scheduler]) < len(job.unscheduled_tasks)):
             #Insufficient tokens, steal tokens
             tokens_needed = len(job.unscheduled_tasks) - len(self.tokens[scheduler])
-            for i in range(NUM_SCHEDULERS):
-                if(i != scheduler):
-                    i_tokens = len(self.tokens[i])
-                    while(i_tokens > 0 and tokens_needed > 0):
-                        self.tokens[scheduler].append(self.tokens[i].pop())
-                        i_tokens -= 1
-                        tokens_needed -= 1
+            self.steal_tokens(scheduler, tokens_needed)
             #Add network delay for token stealing
             current_time += 2 * NETWORK_DELAY
+        '''
         #print "comes here", len(job.unscheduled_tasks), len(self.tokens[scheduler])
         task_arrival_events = self.maybe_schedule_task(current_time, scheduler)
         #print "finished"
@@ -226,11 +287,16 @@ class Simulation(object):
         job_complete = self.jobs[job_id].task_completed(completion_time)
         if job_complete:
             self.remaining_jobs -= 1
+            self.finished_jobs += 1
 
     def run(self):
-        self.event_queue.put((0, JobArrival(self, self.interarrival_delay, self.task_distribution)))
+        #self.event_queue.put((0, JobArrival(self, self.interarrival_delay, self.task_distribution)))
+        job_arrival_event = JobArrivalFile(self, "/Users/vipulharsh/Desktop/UIUC/courses/cs525/eagle/traces/YH_trimmed.tr")
         last_time = 0
-        while self.remaining_jobs > 0:
+        last_time = job_arrival_event.job_generator.get_next_job_delay(last_time)
+        self.event_queue.put((last_time, job_arrival_event))
+        self.event_queue.put((last_time, HeartbeatEvent(self)))
+        while self.remaining_jobs > 0 and (not (self.no_more_jobs and self.finished_jobs == len(self.jobs))):
             current_time, event = self.event_queue.get()
             assert current_time >= last_time
             last_time = current_time
@@ -238,6 +304,8 @@ class Simulation(object):
             for new_event in new_events:
                 self.event_queue.put(new_event)
 
+        for i in range(NUM_SCHEDULERS):
+            print "Leftover tokens at ",i,": ", len(self.tokens[i])
         print ("Simulation ended after %s milliseconds (%s jobs started)" %
                (last_time, len(self.jobs)))
         complete_jobs = [j for j in self.jobs.values() if j.completed_tasks_count == j.num_tasks]

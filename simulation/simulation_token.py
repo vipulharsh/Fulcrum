@@ -20,13 +20,12 @@ import math
 import numpy
 import random
 import Queue
-from util import Job, TaskDistributions
+from util import Job, TaskDistributions, JobsFromDistribution, JobsFromTrace
+from util import NUM_SCHEDULERS, TASKS_PER_JOB, MEDIAN_TASK_DURATION
 
-MEDIAN_TASK_DURATION = 100
 NETWORK_DELAY = 0.5
-TASKS_PER_JOB = 100
 SLOTS_PER_WORKER = 4
-TOTAL_WORKERS = 10000
+TOTAL_WORKERS = 1000
 WARM_UP_TIME = 500
 
 def get_percentile(N, percent, key=lambda x:x):
@@ -63,20 +62,39 @@ class Event(object):
 class JobArrival(Event):
     """ Event to signify a job arriving at a scheduler. """
     def __init__(self, simulation, interarrival_delay, task_distribution):
+        self.job_generator = JobsFromDistribution(interarrival_delay, task_distribution)
         self.simulation = simulation
-        self.interarrival_delay = interarrival_delay
-        self.task_distribution = task_distribution
 
     def run(self, current_time):
-        random.seed(current_time)
-        job = Job(TASKS_PER_JOB, current_time, self.task_distribution, MEDIAN_TASK_DURATION)
+        job = self.job_generator.get_next_job(current_time)
         #print "Job %s arrived at %s" % (job.id, current_time)
         # Schedule job.
         new_events = self.simulation.send_tasks(job, current_time)
+
         # Add new Job Arrival event, for the next job to arrive after this one.
-        random.seed(current_time)
-        arrival_delay = random.expovariate(1.0 / self.interarrival_delay)
-        new_events.append((current_time + arrival_delay, self))
+        arrival_delay = self.job_generator.get_next_job_delay(current_time)
+        if(arrival_delay != None):
+            new_events.append((current_time + arrival_delay, self))
+        #print "Retuning %s events" % len(new_events)
+        return new_events
+
+
+class JobArrivalFile(Event):
+    """ Event to signify a job arriving at a scheduler. """
+    def __init__(self, simulation, tracefile):
+        self.job_generator = JobsFromTrace(tracefile)
+        self.simulation = simulation
+
+    def run(self, current_time):
+        job = self.job_generator.get_next_job(current_time)
+        if(job.id % 5000 == 0):
+            print "Job %s arrived at %s" % (job.id, current_time)
+        # Schedule job.
+        new_events = self.simulation.send_tasks(job, current_time)
+        # Add new Job Arrival event, for the next job to arrive after this one.
+        arrival_delay = self.job_generator.get_next_job_delay(current_time)
+        if(arrival_delay != None):
+            new_events.append((current_time + arrival_delay, self))
         #print "Retuning %s events" % len(new_events)
         return new_events
 
@@ -130,6 +148,7 @@ class Worker(object):
         if self.free_slots > 0:
             token = TokenArrival(self.simulation, self.id)
             new_events.append((current_time+NETWORK_DELAY, token))
+            #new_events.append((current_time, token))
         return new_events
 
     def maybe_start_task(self, current_time):
@@ -208,9 +227,12 @@ class Simulation(object):
             self.remaining_jobs -= 1
 
     def run(self):
-        self.event_queue.put((0, JobArrival(self, self.interarrival_delay, self.task_distribution)))
+        #self.event_queue.put((0, JobArrival(self, self.interarrival_delay, self.task_distribution)))
+        job_arrival_event = JobArrivalFile(self, "/Users/vipulharsh/Desktop/UIUC/courses/cs525/eagle/traces/YH_trimmed.tr")
         last_time = 0
-        while self.remaining_jobs > 0:
+        last_time = job_arrival_event.job_generator.get_next_job_delay(last_time)
+        self.event_queue.put((last_time, job_arrival_event))
+        while self.remaining_jobs > 0 and self.event_queue.qsize() > 0:
             current_time, event = self.event_queue.get()
             assert current_time >= last_time
             last_time = current_time

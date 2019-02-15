@@ -68,7 +68,8 @@ class JobArrival(Event):
         self.task_distribution = task_distribution
 
     def run(self, current_time):
-        job = Job(TASKS_PER_JOB, current_time, self.task_distribution, MEDIAN_TASK_DURATION)
+        scheduler = random.randint(0, NUM_SCHEDULERS-1)
+        job = Job(TASKS_PER_JOB, current_time, self.task_distribution, MEDIAN_TASK_DURATION, scheduler)
         #print "Job %s arrived at %s" % (job.id, current_time)
         # Schedule job.
         new_events = self.simulation.send_tasks(job, current_time)
@@ -207,7 +208,7 @@ class Simulation(object):
             delay = 0.0
             curr_header = self.TaskHeader(10000000) #task_header
             chosen_worker_idx = -1
-            prev_worker = (job.job_id_hash)%len(self.workers)
+            prev_worker = job.scheduler
             for k in range(10):
                 delay += NETWORK_DELAY
                 worker_idx = self.workers[prev_worker].get_random_worker(current_time)

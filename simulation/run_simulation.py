@@ -21,6 +21,8 @@ import simulation_multi
 import simulation_cancellation
 import simulation_fulcrum
 import simulation_fulcrum2
+import simulation_token
+import simulation_token_d
 import util
 
 def get_percentile(N, percent, key=lambda x:x):
@@ -35,15 +37,35 @@ def get_percentile(N, percent, key=lambda x:x):
     d1 = key(N[int(c)]) * (k-f)
     return d0 + d1
 
-NUM_JOBS = 5000
+NUM_JOBS = 20000000
 DISTRIBUTION = util.TaskDistributions.EXP_JOBS
+#DISTRIBUTION = util.TaskDistributions.EXP_TASKS
 
-loads = [0.1, 0.3, 0.5, 0.7, 0.8, 0.9, 0.95]
-#loads = [0.1, 0.3, 0.5]
-#loads = [0.95]
+#loads = [0.1, 0.3, 0.5, 0.7, 0.8, 0.9, 0.95, 0.999]
+#loads = [0.50, 0.65, 0.70, 0.75, 0.80, 0.85, 0.90, 0.95, 0.99]
+loads = [0.95]
 loads.reverse()
 for load in loads:
     print "Running simulations at %s load" % load
+
+    print "\nToken Distributed"
+    s = simulation_token_d.Simulation(NUM_JOBS, "token_d_%s" % load, load, DISTRIBUTION)
+    s.run()
+
+    print "\nToken"
+    s = simulation_token.Simulation(NUM_JOBS, "token_%s" % load, load, DISTRIBUTION)
+    s.run()
+    continue
+
+    print "\nSparrow"
+    simulation_cancellation.WORK_STEALING = False
+    simulation_cancellation.CANCELLATION = False
+    s = simulation_cancellation.Simulation(NUM_JOBS, "sparrow_%s" % load, load, DISTRIBUTION)
+    s.run()
+
+    print "\nCentralized"
+    s = simulation_centralized.Simulation(NUM_JOBS, "centralized_%s" % load, load, DISTRIBUTION)
+    s.run()
 
     print "\nFulcrum2"
     s = simulation_fulcrum2.Simulation(NUM_JOBS, "fulcrum2_%s" % load, load, DISTRIBUTION)
@@ -56,22 +78,11 @@ for load in loads:
     print "******Multiget"
     s = simulation_multi.Simulation(NUM_JOBS, "multi_tasks_%s" % load, load, DISTRIBUTION)
     s.run()
-    continue
-
-    print "\nSparrow"
-    simulation_cancellation.WORK_STEALING = False
-    simulation_cancellation.CANCELLATION = False
-    s = simulation_cancellation.Simulation(NUM_JOBS, "sparrow_%s" % load, load, DISTRIBUTION)
-    s.run()
 
     print "\nCancellation"
     simulation_cancellation.WORK_STEALING = False
     simulation_cancellation.CANCELLATION = True
     s = simulation_cancellation.Simulation(NUM_JOBS, "cancellation_%s" % load, load, DISTRIBUTION)
-    s.run()
-
-    print "\nCentralized"
-    s = simulation_centralized.Simulation(NUM_JOBS, "centralized_%s" % load, load, DISTRIBUTION)
     s.run()
 
     print "\nRandom"

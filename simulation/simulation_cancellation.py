@@ -19,18 +19,18 @@ import math
 import numpy
 import random
 import Queue
-from util import Job, TaskDistributions
+from util import Job, TaskDistributions, JobsFromDistribution, JobsFromTrace
+from util import NUM_SCHEDULERS, TASKS_PER_JOB, MEDIAN_TASK_DURATION
+import util
 
-MEDIAN_TASK_DURATION = 100
 NETWORK_DELAY = 0.5
-TASKS_PER_JOB = 100
 SLOTS_PER_WORKER = 4
-TOTAL_WORKERS = 10000
+TOTAL_WORKERS = 1000
 WARM_UP_TIME = 500
 PROBE_RATIO = 2
 CANCELLATION = False
 WORK_STEALING = False
-NUM_SCHEDULERS = 1
+
 
 def get_percentile(N, percent, key=lambda x:x):
     if not N:
@@ -66,22 +66,36 @@ class Event(object):
 class JobArrival(Event):
     """ Event to signify a job arriving at a scheduler. """
     def __init__(self, simulation, interarrival_delay, task_distribution):
+        self.job_generator = JobsFromDistribution(interarrival_delay, task_distribution)
         self.simulation = simulation
-        self.interarrival_delay = interarrival_delay
-        self.task_distribution = task_distribution
 
     def run(self, current_time):
-        scheduler = random.randint(0, NUM_SCHEDULERS - 1)
-        random.seed(current_time)
-        job = Job(TASKS_PER_JOB, current_time, self.task_distribution, MEDIAN_TASK_DURATION,
-                  scheduler)
-        #print "Job %s arrived at %s" % (job.id, current_time)
+        job = self.job_generator.get_next_job(current_time)
+        print "Job %s arrived at %s" % (job.id, current_time)
         # Schedule job.
         new_events = self.simulation.send_probes(job, current_time)
         # Add new Job Arrival event, for the next job to arrive after this one.
-        random.seed(current_time)
-        arrival_delay = random.expovariate(1.0 / self.interarrival_delay)
-        new_events.append((current_time + arrival_delay, self))
+        arrival_delay = self.job_generator.get_next_job_delay(current_time)
+        if(arrival_delay != None):
+            new_events.append((current_time + arrival_delay, self))
+        #print "Retuning %s events" % len(new_events)
+        return new_events
+
+class JobArrivalFile(Event):
+    def __init__(self, simulation, tracefile):
+        self.job_generator = JobsFromTrace(tracefile)
+        self.simulation = simulation
+
+    def run(self, current_time):
+        job = self.job_generator.get_next_job(current_time)
+        if(job.id%5000 == 0):
+            print "Job %s arrived at %s" % (job.id, current_time)
+        # Schedule job.
+        new_events = self.simulation.send_probes(job, current_time)
+        # Add new Job Arrival event, for the next job to arrive after this one.
+        arrival_delay = self.job_generator.get_next_job_delay(current_time)
+        if(arrival_delay != None):
+            new_events.append((current_time + arrival_delay, self))
         #print "Retuning %s events" % len(new_events)
         return new_events
 
@@ -177,7 +191,9 @@ class Worker(object):
         logging.debug("Attempting to cancel probe for job %s on worker %s (queue: %s) at %s" %
                       (job_id, self.id, self.queued_probes, current_time))
         if job_id in self.queued_probes:
-            self.queued_probes.remove(job_id)
+            #Remove all instances of job_id
+            self.queued_probes = filter(lambda a: a != job_id, self.queued_probes)
+            #self.queued_probes.remove(job_id)
             self.successful_cancellations += 1
 
     def finish_simulation(self, current_time):
@@ -187,6 +203,7 @@ class Worker(object):
 
 class Simulation(object):
     def __init__(self, num_jobs, file_prefix, load, task_distribution):
+        #util.NUM_SCHEDULERS = 1
         avg_used_slots = load * SLOTS_PER_WORKER * TOTAL_WORKERS
         self.interarrival_delay = (1.0 * MEDIAN_TASK_DURATION * TASKS_PER_JOB / avg_used_slots)
         print ("Interarrival delay: %s (avg slots in use: %s)" %
@@ -217,13 +234,22 @@ class Simulation(object):
         self.jobs[job.id] = job
         self.unscheduled_jobs[job.scheduler].append(job)
 
-        random.shuffle(self.worker_indices)
+        median_task_duration = numpy.median(job.unscheduled_tasks)
+
         probe_events = []
         num_probes = PROBE_RATIO * len(job.unscheduled_tasks)
-        for worker_index in self.worker_indices[:num_probes]:
-            probe_events.append((current_time + NETWORK_DELAY,
-                                 ProbeEvent(self.workers[worker_index], job.id)))
-            job.probed_workers.add(worker_index)
+        num_probes_left = num_probes
+        while(num_probes_left > 0):
+            num_probes_in_round = min(num_probes_left, len(self.worker_indices))
+            random.shuffle(self.worker_indices)
+            for worker_index in self.worker_indices[:num_probes_in_round]:
+                probe_events.append((current_time + NETWORK_DELAY,
+                                     ProbeEvent(self.workers[worker_index], job.id)))
+                if(worker_index not in job.probed_workers):
+                    job.probed_workers[worker_index] = 0
+                job.probed_workers[worker_index] += 1
+            num_probes_left -= num_probes_in_round
+        #print "Num Probes: ", num_probes, len(job.unscheduled_tasks), len(probe_events)
         return probe_events
 
     def get_task(self, job_id, worker, current_time):
@@ -258,7 +284,7 @@ class Simulation(object):
                 # Cancel remaining outstanding probes.
                 logging.debug("Cancelling probes for job %s (will arrive at %s)" %
                               (job.id, response_time))
-                for worker_id in job.probed_workers:
+                for worker_id in job.probed_workers.keys():
                     self.attempted_cancellations += 1
                     events.append((response_time,
                                    CancellationEvent(self.workers[worker_id], job.id)))
@@ -283,12 +309,15 @@ class Simulation(object):
             #       (job_id, self.jobs[job_id].end_time - self.jobs[job_id].start_time))
 
     def run(self):
-        self.event_queue.put((0, JobArrival(self, self.interarrival_delay, self.task_distribution)))
+        #self.event_queue.put((0, JobArrival(self, self.interarrival_delay, self.task_distribution)))
+        job_arrival_event = JobArrivalFile(self, "/Users/vipulharsh/Desktop/UIUC/courses/cs525/eagle/traces/YH.tr")
         last_time = 0
+        last_time = job_arrival_event.job_generator.get_next_job_delay(last_time)
+        self.event_queue.put((last_time, job_arrival_event))
         last_report = self.remaining_jobs
         half_jobs = self.remaining_jobs / 2
         output_worker_loads = False
-        while self.remaining_jobs > 0:
+        while self.remaining_jobs > 0 and self.event_queue.qsize() > 0:
             #if self.remaining_jobs != last_report and self.remaining_jobs % 100 == 0:
             #    print self.remaining_jobs, "jobs remaining"
             #    last_report = self.remaining_jobs
